@@ -1,3 +1,5 @@
+<img src="docs/icon.png" alt="" width="96" align="right">
+
 # Water Guard card
 
 A Lovelace card for the [Water Guard](https://github.com/mvheimburg/water-guard)
