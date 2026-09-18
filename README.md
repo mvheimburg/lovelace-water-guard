@@ -5,26 +5,97 @@ integration. It shows a leak alert clearly and gives the household the one
 action they need afterwards: **Override: open water**. English and Norwegian
 Bokmål (*Vannvakt*).
 
-**Status:** not yet released. This repository is being set up.
+![Water Guard card in a light theme: calm, a sensor still wet after an override, and an active leak alert](docs/water-guard-light.png)
 
-## Planned scope
+![The same three states with the Bubble appearance in a dark theme](docs/water-guard-dark.png)
 
-- Calm "no leak" status, and a clear alert when a leak is detected: which
-  sensors fired, since when, and who was notified.
-- Whether each water valve is open or closed.
-- «Overstyr: åpne vannet» (Override: open water), which calls Water Guard's
-  override action. It asks for confirmation, says when a sensor still reports
-  a leak, and shows a valve that failed to open.
-- Pending, failed and unavailable states, with the action disabled when data is
-  unavailable.
-- Default and Bubble appearances, light and dark themes, and narrow layouts.
+The images use the production bundle with simulated Home Assistant states. No
+live Home Assistant instance was involved.
 
-Water Guard's own settings stay in the integration, under **Settings →
-Devices & services → Water Guard → Configure**. The card's settings cog links
-there.
+## Requirements
 
-Installs through HACS (category **Dashboard**) and requires the Water Guard
-integration.
+- The [Water Guard](https://github.com/mvheimburg/water-guard) integration,
+  **0.2.0 or later** for the full card. With 0.1.x, the card still shows the
+  alert and the override, but it can only list valves and people after they
+  have been used, and it says so.
+- Installs through HACS as a **Dashboard** repository.
+
+## Install
+
+In HACS, open **Custom repositories**, add
+`https://github.com/mvheimburg/lovelace-water-guard` as a **Dashboard**
+repository, and install **Water Guard Card**. HACS normally adds the resource;
+if not, add `/hacsfiles/lovelace-water-guard/water-guard-card.js` as a
+JavaScript module under **Settings → Dashboards → Resources**.
+
+## Card
+
+```yaml
+type: custom:water-guard-card
+entity: binary_sensor.water_leak
+title: Vannvakt
+appearance: bubble
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `entity` | first Water Guard found | The Water Guard **Leak** binary sensor. One card per guarded water supply. |
+| `title` | Water Guard / Vannvakt | Optional heading. |
+| `appearance` | `default` | `default` or `bubble` (uses the dashboard's `--bubble-*` variables). |
+
+The visual editor lists only Water Guard Leak sensors. Water Guard's own
+settings — leak sensors, people, valves and whether it shuts the water off —
+stay in the integration under **Settings → Devices & services → Water Guard →
+Configure**. The card's settings cog links there.
+
+## What it shows
+
+**No leak.** How many sensors are watched, whether the water is on, how many
+people are alerted on a leak, and each valve's position (a `switch` that drives
+a valve counts as open when on). It also says when a sensor still reports water
+after an override, and when a sensor cannot be watched because it is
+unavailable.
+
+**Leak.** The card turns red: when the leak was detected and for how long, each
+sensor that fired and whether it is still wet, whether the water is shut off —
+or which valve is still open — and who was alerted, who was not reached
+(for example *no app*), and who is still being alerted.
+
+**Override: open water** opens a confirmation that names the valves it will
+open and warns when a sensor still reports water. Confirming calls
+`water_guard.override` on the Leak sensor. While Water Guard opens the valves the
+button shows *Opening the water…* and cannot be pressed again. If a valve does
+not open, Water Guard keeps the alert and the card shows the error and the valve
+that failed. The card never assumes the result; it waits for Water Guard's
+state. If the alert changes while the confirmation is open, confirming is
+refused and you are asked to review it again.
+
+When Water Guard is unavailable, the card says so and the override is disabled.
+The settings link stays available.
+
+## Language and formatting
+
+The card follows Home Assistant's language (`nb`, `nb-NO` and `no` give Bokmål;
+`nn` uses Bokmål too; anything else English) and updates when it changes. Times
+use Home Assistant's formatting locale and 12/24-hour preference separately, so
+English with `en-GB` keeps a 24-hour clock. Sensor, valve and person names are
+shown as Home Assistant names them. The card-picker entry is English because it
+has no Home Assistant context.
+
+## Development
+
+```sh
+npm ci
+npx playwright install chromium
+npm test
+npm run lint
+npm run typecheck
+npm run build
+node scripts/screenshot.cjs
+```
+
+`dist/` is committed and must match the build. Pushing a new `package.json`
+version to `main` tags `v<version>` and publishes a release.
 
 ## License
 
