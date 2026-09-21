@@ -20,6 +20,11 @@ export interface HomeAssistant {
     target?: { entity_id: string },
     notifyOnError?: boolean,
   ): Promise<unknown>;
+  /** Websocket access; the history dialog reads the recorder through it. */
+  callWS?<T>(message: Record<string, unknown>): Promise<T>;
+  connection?: {
+    sendMessagePromise<T>(message: Record<string, unknown>): Promise<T>;
+  };
 }
 
 export interface CardConfig {

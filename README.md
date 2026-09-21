@@ -75,6 +75,31 @@ refused and you are asked to review it again.
 When Water Guard is unavailable, the card says so and the override is disabled.
 The settings link stays available.
 
+## History
+
+Tap the status in the header (*No leak* / *Leak*), the **sensors** or
+**Water** tile, a valve, or a sensor listed in a leak alert to open the
+**Leak and valve history** of this guarded supply. It is a timeline from Home
+Assistant's recorder with one lane each for Water Guard's leak alert, every
+leak sensor and every valve:
+
+| Lane | States and colors |
+| --- | --- |
+| Leak alert | *No leak* (blue), *Leak* (red) |
+| Leak sensor | *Dry* (blue), *Wet* (red) |
+| Valve | *Open* (blue), *Closed* (amber), *Opening* / *Closing* (grey-blue) |
+
+An unavailable spell is a hatched grey gap; before the first recorded state the
+lane is empty. Choose **6 h**, **24 h** or **7 d** (*6 t / 24 t / 7 d* in
+Bokmål). Move the pointer, or drag a finger, along the timeline to read every
+lane's state at that moment; the time is shown under the timeline, and without
+a pointer the states are the current ones. Each lane in the legend below opens
+that entity's details (more-info). The *alerted on a leak* count is not a
+sensor reading and does not open a history.
+
+The card reads the recorder with the `history/history_during_period` websocket
+command, so the entities need to be recorded (the default).
+
 ## Language and formatting
 
 The card follows Home Assistant's language (`nb`, `nb-NO` and `no` give Bokmål;

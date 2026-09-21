@@ -1,8 +1,19 @@
 import { applyColorScheme } from "./color-schemes";
 import { LitElement, html, nothing } from "lit";
+import { timeAt, timeline } from "./chart";
 import { validateConfig } from "./config";
 import { icon } from "./icons";
 import { formatLocale, list, localize, type MessageKey } from "./localize";
+import {
+  RANGES,
+  TONE,
+  loadLanes,
+  stateAt,
+  type Lane,
+  type LaneKind,
+  type LaneState,
+  type Range,
+} from "./history";
 import { friendlyName, guardSensors, readGuard, valveStatus } from "./model";
 import { styles } from "./styles";
 import type { CardConfig, Guard, HomeAssistant, ValveStatus } from "./types";
@@ -28,6 +39,16 @@ export class WaterGuardCard extends LitElement {
   /** The alert the confirmation was opened for; confirm refuses a changed one. */
   private confirming?: string;
   private timer?: ReturnType<typeof setInterval>;
+  /** History dialog: chosen range, loaded lanes and the hovered time. */
+  private range: Range = 24;
+  private lanes?: Lane[];
+  private window?: [number, number];
+  private historyLoading = false;
+  private historyError = "";
+  private hover?: number;
+  private historyTicket = 0;
+  private plotWidth = 600;
+  private resize?: ResizeObserver;
 
   static getConfigElement() {
     return document.createElement("water-guard-card-editor");
@@ -43,6 +64,7 @@ export class WaterGuardCard extends LitElement {
       this.error = "";
       this.confirming = undefined;
       this.closeDialog();
+      this.closeHistory();
     }
     this.config = next;
     this.requestUpdate();
@@ -65,6 +87,23 @@ export class WaterGuardCard extends LitElement {
     super.disconnectedCallback();
     clearInterval(this.timer);
     this.closeDialog();
+    this.closeHistory();
+    this.resize?.disconnect();
+    this.resize = undefined;
+  }
+  protected updated() {
+    const plot = this.shadowRoot?.querySelector(".history-plot");
+    if (!plot || this.resize) return;
+    this.resize = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      // Redraw next frame, outside the observer's own layout pass.
+      if (width > 0 && Math.abs(width - this.plotWidth) > 4)
+        requestAnimationFrame(() => {
+          this.plotWidth = width;
+          this.requestUpdate();
+        });
+    });
+    this.resize.observe(plot);
   }
 
   private t(key: MessageKey, values?: Record<string, string | number>) {
@@ -141,6 +180,228 @@ export class WaterGuardCard extends LitElement {
   private closeDialog() {
     this.shadowRoot?.querySelector<HTMLDialogElement>("#confirm")?.close();
   }
+  /** Close the history and drop what it loaded; a late reply is ignored. */
+  private closeHistory() {
+    this.historyTicket++;
+    this.lanes = this.window = this.hover = undefined;
+    this.historyLoading = false;
+    this.historyError = "";
+    this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
+  }
+  /** The leak alert, every leak sensor and every valve of this guard. */
+  private historySources(): Array<{ kind: LaneKind; entityId: string }> {
+    const entity = this.config?.entity;
+    if (!entity) return [];
+    const guard = this.guard;
+    const sensors = [
+      ...new Set([
+        ...guard.watched,
+        ...guard.fired,
+        ...guard.wet,
+        ...guard.unavailableSensors,
+      ]),
+    ];
+    return [
+      { kind: "alert" as const, entityId: entity },
+      ...sensors.map((entityId) => ({ kind: "sensor" as const, entityId })),
+      ...guard.valves.map((entityId) => ({ kind: "valve" as const, entityId })),
+    ];
+  }
+  private async openHistory() {
+    await this.updateComplete;
+    const dialog =
+      this.shadowRoot?.querySelector<HTMLDialogElement>("#history");
+    if (dialog && !dialog.open) dialog.showModal();
+    void this.loadHistory();
+  }
+  private async loadHistory(range: Range = this.range) {
+    const hass = this.ha;
+    if (!hass) return;
+    const ticket = ++this.historyTicket;
+    this.range = range;
+    this.historyLoading = true;
+    this.historyError = "";
+    this.hover = undefined;
+    this.requestUpdate();
+    const end = Date.now();
+    try {
+      const lanes = await loadLanes(
+        hass,
+        this.historySources(),
+        hass.states,
+        range,
+        end,
+      );
+      if (ticket !== this.historyTicket) return;
+      this.lanes = lanes;
+      this.window = [end - range * 3_600_000, end];
+    } catch (error) {
+      if (ticket !== this.historyTicket) return;
+      this.lanes = this.window = undefined;
+      this.historyError = `${this.t("historyFailed")}: ${
+        error instanceof Error
+          ? error.message
+          : typeof error === "object" && error && "message" in error
+            ? String(error.message)
+            : String(error)
+      }`;
+    }
+    this.historyLoading = false;
+    this.requestUpdate();
+  }
+  private moreInfo(entityId: string) {
+    this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
+    this.dispatchEvent(
+      new CustomEvent("hass-more-info", {
+        detail: { entityId },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+  private laneName(lane: Lane) {
+    return lane.kind === "alert"
+      ? this.t("leakAlert")
+      : friendlyName(this.ha?.states ?? {}, lane.entityId);
+  }
+  private laneState(lane: Lane, state: LaneState | undefined | null) {
+    if (state === null) return "—";
+    const key: Record<LaneState, MessageKey> = {
+      clear: "noLeak",
+      leak: lane.kind === "alert" ? "leak" : "stateWet",
+      dry: "stateDry",
+      open: "valveOpen",
+      closed: "valveClosed",
+      opening: "valveOpening",
+      closing: "valveClosing",
+    };
+    return this.t(state ? key[state] : "unavailable");
+  }
+  private historyDialog() {
+    const locale = formatLocale(this.ha);
+    const format = this.ha?.locale?.time_format;
+    const hour12 = format === "12" ? true : format === "24" ? false : undefined;
+    const time = (ms: number, withDay: boolean) =>
+      new Intl.DateTimeFormat(
+        locale,
+        withDay
+          ? { weekday: "short", day: "numeric" }
+          : { hour: "2-digit", minute: "2-digit", hour12 },
+      ).format(ms);
+    const when = (ms: number) =>
+      new Intl.DateTimeFormat(locale, {
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12,
+      }).format(ms);
+    const span = (hours: number) =>
+      new Intl.NumberFormat(locale, {
+        style: "unit",
+        unit: hours < 48 ? "hour" : "day",
+        unitDisplay: "short",
+      }).format(hours < 48 ? hours : hours / 24);
+    const lanes = this.lanes;
+    const window = this.window;
+    const at = this.hover;
+    const close = () =>
+      this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
+    return html`<dialog
+      id="history"
+      class=${this.config?.appearance === "bubble" ? "bubble" : ""}
+      aria-labelledby="history-title"
+      @close=${() => {
+        this.historyTicket++;
+        this.hover = undefined;
+      }}
+    >
+      <div class="history-head">
+        <h2 id="history-title">${this.t("historyTitle")}</h2>
+        <button
+          class="history-close"
+          data-close
+          aria-label=${this.t("close")}
+          title=${this.t("close")}
+          @click=${close}
+        >
+          ×
+        </button>
+      </div>
+      <div class="ranges" role="group" aria-label=${this.t("history")}>
+        ${RANGES.map(
+          (hours) =>
+            html`<button
+              data-range=${hours}
+              aria-pressed=${String(this.range === hours)}
+              @click=${() => void this.loadHistory(hours)}
+            >
+              ${span(hours)}
+            </button>`,
+        )}
+      </div>
+      <div
+        class="history-plot"
+        aria-busy=${String(this.historyLoading)}
+        @pointermove=${(e: PointerEvent) => {
+          const chart = (e.currentTarget as HTMLElement).querySelector("svg");
+          if (!chart || !window) return;
+          this.hover = timeAt(e, chart, window[0], window[1]);
+          this.requestUpdate();
+        }}
+        @pointerleave=${() => {
+          this.hover = undefined;
+          this.requestUpdate();
+        }}
+      >
+        ${
+          this.historyError
+            ? html`<p class="note sev-alarm" role="alert">
+                ${this.historyError}
+              </p>`
+            : !lanes || !window
+              ? html`<p class="history-hint" role="status">
+                  ${this.t("loading")}
+                </p>`
+              : lanes.every((lane) => lane.points.every(([, v]) => !v))
+                ? html`<p class="history-hint">${this.t("noHistory")}</p>`
+                : timeline(
+                    lanes,
+                    window[0],
+                    window[1],
+                    at,
+                    {
+                      time,
+                      name: (lane) => this.laneName(lane),
+                      state: (lane, state) => this.laneState(lane, state),
+                      label: this.t("historyTitle"),
+                    },
+                    Math.max(280, this.plotWidth),
+                  )
+        }
+      </div>
+      <p class="history-when" aria-live="polite">
+        ${at === undefined ? this.t("now") : when(at)}
+      </p>
+      <div class="history-legend">
+        ${(lanes ?? []).map((lane) => {
+          const state =
+            at === undefined
+              ? lane.points[lane.points.length - 1]?.[1]
+              : stateAt(lane, at);
+          const tone = state === null ? "none" : state ? TONE[state] : "gap";
+          return html`<button
+            class=${`lane-item tone-${tone}`}
+            data-lane=${lane.entityId}
+            @click=${() => this.moreInfo(lane.entityId)}
+          >
+            <span class="lane-swatch"></span>
+            <span class="lane-name">${this.laneName(lane)}</span>
+            <strong class="lane-state">${this.laneState(lane, state)}</strong>
+          </button>`;
+        })}
+      </div>
+    </dialog>`;
+  }
   private async ask() {
     const guard = this.guard;
     if (this.running || !guard.alert) return;
@@ -213,16 +474,26 @@ export class WaterGuardCard extends LitElement {
           : nothing
       }
       <div class="tiles">
-        <div class="tile">
+        <button
+          class="tile"
+          data-history="sensors"
+          aria-describedby="history-hint"
+          @click=${this.openHistory}
+        >
           <span class="value">${guard.watched.length}</span>
           <span class="label"
             >${this.t(guard.watched.length === 1 ? "sensorsOne" : "sensors")}</span
           >
-        </div>
-        <div class="tile">
+        </button>
+        <button
+          class="tile"
+          data-history="water"
+          aria-describedby="history-hint"
+          @click=${this.openHistory}
+        >
           <span class="value">${this.waterValue(guard)}</span>
           <span class="label">${this.t("water")}</span>
-        </div>
+        </button>
         ${
           guard.legacy
             ? nothing
@@ -253,9 +524,17 @@ export class WaterGuardCard extends LitElement {
                   : "unknown"
             }"
           >
-            <span class="icon">${icon("valve")}</span>
-            <span class="name">${friendlyName(this.ha!.states, valve.id)}</span>
-            <span class="status">${this.t(VALVE_LABEL[valve.status])}</span>
+            <button
+              data-history=${valve.id}
+              aria-describedby="history-hint"
+              @click=${this.openHistory}
+            >
+              <span class="icon">${icon("valve")}</span>
+              <span class="name"
+                >${friendlyName(this.ha!.states, valve.id)}</span
+              >
+              <span class="status">${this.t(VALVE_LABEL[valve.status])}</span>
+            </button>
           </li>`,
       )}
     </ul>`;
@@ -330,10 +609,18 @@ export class WaterGuardCard extends LitElement {
           const wet = guard.wet.includes(id);
           const gone = guard.unavailableSensors.includes(id);
           return html`<li>
-            <strong>${friendlyName(this.ha!.states, id)}</strong>
-            <span class="badge ${wet ? "wet" : ""}"
-              >${this.t(wet ? "stillWet" : gone ? "sensorUnavailable" : "dryNow")}</span
+            <button
+              data-history=${id}
+              aria-describedby="history-hint"
+              @click=${this.openHistory}
             >
+              <strong>${friendlyName(this.ha!.states, id)}</strong>
+              <span class="badge ${wet ? "wet" : ""}"
+                >${this.t(
+                  wet ? "stillWet" : gone ? "sensorUnavailable" : "dryNow",
+                )}</span
+              >
+            </button>
           </li>`;
         })}
       </ul>
@@ -425,15 +712,23 @@ export class WaterGuardCard extends LitElement {
             <strong>${this.config.title ?? this.t("title")}</strong>
             ${sub ? html`<span class="sub">${sub}</span>` : nothing}
           </span>
-          <span class="status"
-            >${this.t(
-              !guard.available
-                ? "unavailable"
-                : guard.alert
-                  ? "leak"
-                  : "noLeak",
-            )}</span
+          <button
+            class="status-button"
+            data-history="alert"
+            aria-describedby="history-hint"
+            ?disabled=${!state}
+            @click=${this.openHistory}
           >
+            <span class="status"
+              >${this.t(
+                !guard.available
+                  ? "unavailable"
+                  : guard.alert
+                    ? "leak"
+                    : "noLeak",
+              )}</span
+            >
+          </button>
           <a
             class="settings"
             href="/config/integrations/integration/water_guard"
@@ -462,8 +757,9 @@ export class WaterGuardCard extends LitElement {
               </p>`
             : nothing
         }
+        <span id="history-hint" hidden>${this.t("showHistory")}</span>
       </ha-card>
-      ${this.renderConfirm(guard)}`;
+      ${this.renderConfirm(guard)}${this.historyDialog()}`;
   }
 }
 

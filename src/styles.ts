@@ -321,12 +321,245 @@ export const styles = css`
     background: var(--wg-alarm);
     color: #fff;
   }
+  /* Readings that open the history keep their look and gain a pressed state. */
+  button.tile {
+    align-items: flex-start;
+    text-align: start;
+    min-height: 44px;
+    border-radius: var(--wg-tile-radius);
+    padding: 12px 14px;
+  }
+  .valves li {
+    padding: 0;
+  }
+  .valves li > button,
+  .fired li > button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    text-align: start;
+    background: transparent;
+    border-radius: inherit;
+  }
+  .valves li > button {
+    padding: 8px 12px 8px 8px;
+  }
+  .fired li {
+    padding: 0;
+  }
+  .fired li > button {
+    justify-content: space-between;
+    padding: 12px 14px;
+  }
+  .status-button {
+    flex: 0 0 auto;
+    padding: 0;
+    min-width: 44px;
+    background: transparent;
+  }
+  .status-button:disabled {
+    cursor: default;
+    opacity: 1;
+  }
+  button.tile:hover,
+  .valves li > button:hover,
+  .status-button:hover:not(:disabled) .status {
+    background-image: linear-gradient(
+      color-mix(in srgb, var(--wg-text) 6%, transparent),
+      color-mix(in srgb, var(--wg-text) 6%, transparent)
+    );
+  }
+  .fired li > button:hover {
+    background: rgb(255 255 255 / 0.08);
+  }
+
+  /* History: one timeline lane per entity, coloured by state. */
+  .tone-ok {
+    --tone: var(--wg-water);
+  }
+  .tone-alarm {
+    --tone: var(--wg-alarm);
+  }
+  .tone-attention {
+    --tone: var(--wg-warn);
+  }
+  .tone-moving {
+    --tone: color-mix(in srgb, var(--wg-water) 45%, var(--wg-neutral));
+  }
+  .tone-gap,
+  .tone-none {
+    --tone: var(--wg-neutral);
+  }
+  dialog#history {
+    background: var(--ha-card-background, var(--card-background-color, #fff));
+    border-radius: var(--ha-card-border-radius, 20px);
+    padding: 16px 16px 20px;
+    width: min(640px, calc(100vw - 24px));
+    max-height: 90dvh;
+    overflow: auto;
+  }
+  dialog#history.bubble {
+    background: var(
+      --bubble-main-background-color,
+      var(--ha-card-background, var(--card-background-color, #fff))
+    );
+    border-radius: min(var(--bubble-border-radius, 32px), 28px);
+  }
+  .history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .history-head h2 {
+    flex: 1;
+    margin: 0 4px;
+    font-size: 1.15rem;
+  }
+  .history-close {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 24px;
+    line-height: 1;
+    background: var(--secondary-background-color, #f3f2ee);
+  }
+  .ranges {
+    display: flex;
+    gap: 6px;
+    margin: 10px 0 8px;
+  }
+  .ranges button {
+    min-height: 44px;
+    padding: 0 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: var(--secondary-background-color, #f3f2ee);
+  }
+  .ranges button[aria-pressed="true"] {
+    background: color-mix(
+      in srgb,
+      var(--wg-water) 24%,
+      var(--secondary-background-color, #f3f2ee)
+    );
+  }
+  .history-plot {
+    min-height: 120px;
+    touch-action: pan-y;
+  }
+  .history-plot .note {
+    margin: 16px 0;
+  }
+  .history-hint {
+    margin: 40px 0;
+    text-align: center;
+    color: var(--wg-muted);
+  }
+  .timeline {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .timeline .grid {
+    stroke: color-mix(in srgb, var(--wg-muted) 22%, transparent);
+  }
+  .timeline .axis {
+    fill: var(--wg-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .timeline .lane-title {
+    fill: var(--wg-muted);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .timeline .track {
+    fill: color-mix(in srgb, var(--wg-muted) 8%, transparent);
+  }
+  .timeline .band {
+    fill: color-mix(in srgb, var(--tone) 34%, transparent);
+  }
+  .timeline .band.tone-alarm {
+    fill: var(--tone);
+  }
+  .timeline .band.tone-gap {
+    fill: url(#wg-gap);
+  }
+  .timeline .gap-bg {
+    fill: color-mix(in srgb, var(--wg-neutral) 10%, transparent);
+  }
+  .timeline .gap-line {
+    stroke: color-mix(in srgb, var(--wg-neutral) 55%, transparent);
+    stroke-width: 2;
+  }
+  .timeline .band-label {
+    fill: var(--wg-text);
+    font-size: 11.5px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+  .timeline .band-label.tone-alarm {
+    fill: #fff;
+  }
+  .timeline .band-label.tone-gap {
+    fill: var(--wg-muted);
+  }
+  .timeline .cursor {
+    stroke: var(--wg-text);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 3;
+  }
+  .history-when {
+    margin: 4px 4px 8px;
+    font-size: 0.78rem;
+    color: var(--wg-muted);
+  }
+  .history-legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 6px;
+  }
+  .lane-item {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 2px 8px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    background: var(--secondary-background-color, #f3f2ee);
+    text-align: start;
+  }
+  .lane-swatch {
+    grid-row: span 2;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--tone);
+  }
+  .lane-item.tone-gap .lane-swatch,
+  .lane-item.tone-none .lane-swatch {
+    background: transparent;
+    border: 2px solid var(--tone);
+  }
+  .lane-name {
+    font-size: 0.75rem;
+    color: var(--wg-muted);
+    overflow-wrap: anywhere;
+  }
+  .lane-state {
+    font-size: 0.95rem;
+  }
   @media (max-width: 400px) {
     ha-card {
       padding: 10px;
     }
     dialog {
       padding: 18px;
+    }
+    dialog#history {
+      padding: 14px 12px 16px;
     }
   }
   ${colorSchemeStyles}

@@ -178,6 +178,186 @@ const colorSchemeStyles = i$4 `
   }
 `;
 
+const RANGES = [6, 24, 168];
+const TONE = {
+    clear: "ok",
+    dry: "ok",
+    open: "ok",
+    leak: "alarm",
+    closed: "attention",
+    opening: "moving",
+    closing: "moving",
+};
+/** A raw Home Assistant state as this lane reads it; anything else is a gap. */
+function laneState(kind, state) {
+    if (kind === "valve")
+        switch (state) {
+            case "open":
+            case "on":
+                return "open";
+            case "closed":
+            case "off":
+                return "closed";
+            case "opening":
+            case "closing":
+                return state;
+            default:
+                return undefined;
+        }
+    if (state === "on")
+        return "leak";
+    if (state === "off")
+        return kind === "alert" ? "clear" : "dry";
+    return undefined;
+}
+/** Ask Home Assistant over its websocket, through whichever API this hass offers. */
+function ask(hass, message) {
+    if (hass.callWS)
+        return hass.callWS(message);
+    if (hass.connection?.sendMessagePromise)
+        return hass.connection.sendMessagePromise(message);
+    return Promise.reject(new Error("Home Assistant history API unavailable"));
+}
+/**
+ * Each lane's states over the last `hours` from Home Assistant's recorder,
+ * ending with the current state at `now`.
+ */
+async function loadLanes(hass, sources, states, hours, now = Date.now()) {
+    const start = now - hours * 3600000;
+    const reply = sources.length
+        ? await ask(hass, {
+            type: "history/history_during_period",
+            start_time: new Date(start).toISOString(),
+            entity_ids: [...new Set(sources.map((s) => s.entityId))],
+            minimal_response: true,
+            no_attributes: true,
+            significant_changes_only: false,
+        })
+        : {};
+    return sources.map(({ kind, entityId }) => {
+        const points = (reply?.[entityId] ?? []).map((row) => [
+            Math.max(start, (row.lu ?? row.lc ?? 0) * 1000),
+            laneState(kind, row.s),
+        ]);
+        points.push([now, laneState(kind, states[entityId]?.state)]);
+        return { kind, entityId, points };
+    });
+}
+/**
+ * The state in force at `time`: `null` before the first record, `undefined`
+ * while unavailable.
+ */
+function stateAt(lane, time) {
+    let value = null;
+    for (const [t, v] of lane.points) {
+        if (t > time)
+            break;
+        value = v;
+    }
+    return value;
+}
+/** Consecutive spells of one state, clipped to the window. */
+function spells(lane, start, end) {
+    const out = [];
+    const points = lane.points;
+    for (let i = 0; i < points.length - 1; i++) {
+        const from = Math.max(start, points[i][0]);
+        const to = Math.min(end, points[i + 1][0]);
+        if (to <= from)
+            continue;
+        const last = out[out.length - 1];
+        if (last && last.state === points[i][1] && last.to === from)
+            last.to = to;
+        else
+            out.push({ from, to, state: points[i][1] });
+    }
+    return out;
+}
+
+/** Horizontal padding each side of the plot. */
+const PAD = 12;
+const TITLE = 18, BAND = 26, GAP = 10, LANE = TITLE + BAND + GAP, AXIS = 22;
+/** Hour ticks that suit the span and the width. */
+function hourTicks(start, end, narrow) {
+    const hours = (end - start) / 3600000;
+    const every = hours <= 6
+        ? narrow
+            ? 2
+            : 1
+        : hours <= 24
+            ? narrow
+                ? 6
+                : 4
+            : narrow
+                ? 48
+                : 24;
+    const out = [];
+    const hour = new Date(start);
+    hour.setMinutes(0, 0, 0);
+    let midnights = 0;
+    for (let t = hour.getTime(); t <= end; t += 3600000) {
+        if (t < start)
+            continue;
+        const h = new Date(t).getHours();
+        if (every >= 24
+            ? h === 0 && midnights++ % (every / 24) === 0
+            : h % every === 0)
+            out.push(t);
+    }
+    return { ticks: out, withDay: every >= 24 };
+}
+/**
+ * One lane per entity: coloured bands for each spell of a state, a hatched
+ * gap while it was unavailable, and nothing before the first record.
+ */
+function timeline(lanes, start, end, hover, text, W = 600) {
+    const RIGHT = W - PAD;
+    const H = lanes.length * LANE + AXIS;
+    const x = (t) => PAD +
+        ((Math.min(Math.max(t, start), end) - start) / (end - start)) *
+            (RIGHT - PAD);
+    const bottom = lanes.length * LANE - GAP;
+    const { ticks, withDay } = hourTicks(start, end, W < 480);
+    return w `<svg class="timeline" viewBox="0 0 ${W} ${H}" role="img" aria-label=${text.label}>
+    <title>${text.label}</title>
+    <defs>
+      <pattern id="wg-gap" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect class="gap-bg" width="7" height="7"></rect>
+        <line class="gap-line" x1="0" y1="0" x2="0" y2="7"></line>
+      </pattern>
+    </defs>
+    ${ticks.map((t) => w `<line class="grid" x1=${x(t)} x2=${x(t)} y1="0" y2=${bottom}></line>
+        <text class="axis" x=${x(t)} y=${bottom + 18} text-anchor="middle">${text.time(t, withDay)}</text>`)}
+    ${lanes.map((lane, i) => {
+        const top = i * LANE;
+        return w `<g class="lane" data-lane=${lane.entityId}>
+        <text class="lane-title" x=${PAD} y=${top + 13}>${text.name(lane)}</text>
+        <rect class="track" x=${PAD} y=${top + TITLE} width=${RIGHT - PAD} height=${BAND} rx="6"></rect>
+        ${spells(lane, start, end).map(({ from, to, state }) => {
+            const x1 = x(from), width = Math.max(1, x(to) - x1);
+            const label = text.state(lane, state);
+            const tone = state ? `tone-${TONE[state]}` : "tone-gap";
+            return w `<rect class=${`band ${tone}`} data-state=${state ?? "unavailable"} x=${x1} y=${top + TITLE} width=${width} height=${BAND}></rect>
+            ${width >= label.length * 6.8 + 12
+                ? w `<text class=${`band-label ${tone}`} x=${x1 + 6} y=${top + TITLE + 17}>${label}</text>`
+                : A}`;
+        })}
+      </g>`;
+    })}
+    ${hover === undefined
+        ? A
+        : w `<line class="cursor" x1=${x(hover)} x2=${x(hover)} y1="0" y2=${bottom}></line>`}
+  </svg>`;
+}
+/** The time under a pointer over the timeline. */
+function timeAt(event, element, start, end) {
+    const box = element.getBoundingClientRect();
+    const W = element.viewBox?.baseVal?.width || box.width;
+    const px = ((event.clientX - box.left) / box.width) * W;
+    const ratio = (px - PAD) / (W - 2 * PAD);
+    return start + Math.min(1, Math.max(0, ratio)) * (end - start);
+}
+
 function validateConfig(input) {
     if (!input || typeof input !== "object")
         throw new Error("Card configuration is required");
@@ -302,6 +482,19 @@ const en = {
     appearance: "Appearance",
     default: "Default",
     bubble: "Bubble",
+    history: "History",
+    showHistory: "Opens the history",
+    historyTitle: "Leak and valve history",
+    historyFailed: "Could not load history",
+    noHistory: "No history for this period",
+    loading: "Loading…",
+    close: "Close",
+    now: "Now",
+    leakAlert: "Leak alert",
+    stateWet: "Wet",
+    stateDry: "Dry",
+    valveOpening: "Opening",
+    valveClosing: "Closing",
 };
 const nb = {
     title: "Vannvakt",
@@ -364,6 +557,19 @@ const nb = {
     appearance: "Utseende",
     default: "Standard",
     bubble: "Bubble",
+    history: "Historikk",
+    showHistory: "Åpner historikken",
+    historyTitle: "Lekkasje- og ventilhistorikk",
+    historyFailed: "Kunne ikke hente historikk",
+    noHistory: "Ingen historikk for denne perioden",
+    loading: "Laster…",
+    close: "Lukk",
+    now: "Nå",
+    leakAlert: "Lekkasjevarsel",
+    stateWet: "Vått",
+    stateDry: "Tørt",
+    valveOpening: "Åpner",
+    valveClosing: "Stenger",
 };
 const dictionaries = { en, nb };
 function localize(hass, key, values = {}) {
@@ -780,12 +986,245 @@ const styles = i$4 `
     background: var(--wg-alarm);
     color: #fff;
   }
+  /* Readings that open the history keep their look and gain a pressed state. */
+  button.tile {
+    align-items: flex-start;
+    text-align: start;
+    min-height: 44px;
+    border-radius: var(--wg-tile-radius);
+    padding: 12px 14px;
+  }
+  .valves li {
+    padding: 0;
+  }
+  .valves li > button,
+  .fired li > button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    text-align: start;
+    background: transparent;
+    border-radius: inherit;
+  }
+  .valves li > button {
+    padding: 8px 12px 8px 8px;
+  }
+  .fired li {
+    padding: 0;
+  }
+  .fired li > button {
+    justify-content: space-between;
+    padding: 12px 14px;
+  }
+  .status-button {
+    flex: 0 0 auto;
+    padding: 0;
+    min-width: 44px;
+    background: transparent;
+  }
+  .status-button:disabled {
+    cursor: default;
+    opacity: 1;
+  }
+  button.tile:hover,
+  .valves li > button:hover,
+  .status-button:hover:not(:disabled) .status {
+    background-image: linear-gradient(
+      color-mix(in srgb, var(--wg-text) 6%, transparent),
+      color-mix(in srgb, var(--wg-text) 6%, transparent)
+    );
+  }
+  .fired li > button:hover {
+    background: rgb(255 255 255 / 0.08);
+  }
+
+  /* History: one timeline lane per entity, coloured by state. */
+  .tone-ok {
+    --tone: var(--wg-water);
+  }
+  .tone-alarm {
+    --tone: var(--wg-alarm);
+  }
+  .tone-attention {
+    --tone: var(--wg-warn);
+  }
+  .tone-moving {
+    --tone: color-mix(in srgb, var(--wg-water) 45%, var(--wg-neutral));
+  }
+  .tone-gap,
+  .tone-none {
+    --tone: var(--wg-neutral);
+  }
+  dialog#history {
+    background: var(--ha-card-background, var(--card-background-color, #fff));
+    border-radius: var(--ha-card-border-radius, 20px);
+    padding: 16px 16px 20px;
+    width: min(640px, calc(100vw - 24px));
+    max-height: 90dvh;
+    overflow: auto;
+  }
+  dialog#history.bubble {
+    background: var(
+      --bubble-main-background-color,
+      var(--ha-card-background, var(--card-background-color, #fff))
+    );
+    border-radius: min(var(--bubble-border-radius, 32px), 28px);
+  }
+  .history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .history-head h2 {
+    flex: 1;
+    margin: 0 4px;
+    font-size: 1.15rem;
+  }
+  .history-close {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 24px;
+    line-height: 1;
+    background: var(--secondary-background-color, #f3f2ee);
+  }
+  .ranges {
+    display: flex;
+    gap: 6px;
+    margin: 10px 0 8px;
+  }
+  .ranges button {
+    min-height: 44px;
+    padding: 0 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: var(--secondary-background-color, #f3f2ee);
+  }
+  .ranges button[aria-pressed="true"] {
+    background: color-mix(
+      in srgb,
+      var(--wg-water) 24%,
+      var(--secondary-background-color, #f3f2ee)
+    );
+  }
+  .history-plot {
+    min-height: 120px;
+    touch-action: pan-y;
+  }
+  .history-plot .note {
+    margin: 16px 0;
+  }
+  .history-hint {
+    margin: 40px 0;
+    text-align: center;
+    color: var(--wg-muted);
+  }
+  .timeline {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .timeline .grid {
+    stroke: color-mix(in srgb, var(--wg-muted) 22%, transparent);
+  }
+  .timeline .axis {
+    fill: var(--wg-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .timeline .lane-title {
+    fill: var(--wg-muted);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .timeline .track {
+    fill: color-mix(in srgb, var(--wg-muted) 8%, transparent);
+  }
+  .timeline .band {
+    fill: color-mix(in srgb, var(--tone) 34%, transparent);
+  }
+  .timeline .band.tone-alarm {
+    fill: var(--tone);
+  }
+  .timeline .band.tone-gap {
+    fill: url(#wg-gap);
+  }
+  .timeline .gap-bg {
+    fill: color-mix(in srgb, var(--wg-neutral) 10%, transparent);
+  }
+  .timeline .gap-line {
+    stroke: color-mix(in srgb, var(--wg-neutral) 55%, transparent);
+    stroke-width: 2;
+  }
+  .timeline .band-label {
+    fill: var(--wg-text);
+    font-size: 11.5px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+  .timeline .band-label.tone-alarm {
+    fill: #fff;
+  }
+  .timeline .band-label.tone-gap {
+    fill: var(--wg-muted);
+  }
+  .timeline .cursor {
+    stroke: var(--wg-text);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 3;
+  }
+  .history-when {
+    margin: 4px 4px 8px;
+    font-size: 0.78rem;
+    color: var(--wg-muted);
+  }
+  .history-legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 6px;
+  }
+  .lane-item {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 2px 8px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    background: var(--secondary-background-color, #f3f2ee);
+    text-align: start;
+  }
+  .lane-swatch {
+    grid-row: span 2;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--tone);
+  }
+  .lane-item.tone-gap .lane-swatch,
+  .lane-item.tone-none .lane-swatch {
+    background: transparent;
+    border: 2px solid var(--tone);
+  }
+  .lane-name {
+    font-size: 0.75rem;
+    color: var(--wg-muted);
+    overflow-wrap: anywhere;
+  }
+  .lane-state {
+    font-size: 0.95rem;
+  }
   @media (max-width: 400px) {
     ha-card {
       padding: 10px;
     }
     dialog {
       padding: 18px;
+    }
+    dialog#history {
+      padding: 14px 12px 16px;
     }
   }
   ${colorSchemeStyles}
@@ -920,6 +1359,12 @@ class WaterGuardCard extends i$1 {
         super(...arguments);
         this.pending = false;
         this.error = "";
+        /** History dialog: chosen range, loaded lanes and the hovered time. */
+        this.range = 24;
+        this.historyLoading = false;
+        this.historyError = "";
+        this.historyTicket = 0;
+        this.plotWidth = 600;
     }
     static getConfigElement() {
         return document.createElement("water-guard-card-editor");
@@ -935,6 +1380,7 @@ class WaterGuardCard extends i$1 {
             this.error = "";
             this.confirming = undefined;
             this.closeDialog();
+            this.closeHistory();
         }
         this.config = next;
         this.requestUpdate();
@@ -957,6 +1403,24 @@ class WaterGuardCard extends i$1 {
         super.disconnectedCallback();
         clearInterval(this.timer);
         this.closeDialog();
+        this.closeHistory();
+        this.resize?.disconnect();
+        this.resize = undefined;
+    }
+    updated() {
+        const plot = this.shadowRoot?.querySelector(".history-plot");
+        if (!plot || this.resize)
+            return;
+        this.resize = new ResizeObserver(([entry]) => {
+            const width = Math.round(entry.contentRect.width);
+            // Redraw next frame, outside the observer's own layout pass.
+            if (width > 0 && Math.abs(width - this.plotWidth) > 4)
+                requestAnimationFrame(() => {
+                    this.plotWidth = width;
+                    this.requestUpdate();
+                });
+        });
+        this.resize.observe(plot);
     }
     t(key, values) {
         return localize(this.ha, key, values);
@@ -1034,6 +1498,205 @@ class WaterGuardCard extends i$1 {
     closeDialog() {
         this.shadowRoot?.querySelector("#confirm")?.close();
     }
+    /** Close the history and drop what it loaded; a late reply is ignored. */
+    closeHistory() {
+        this.historyTicket++;
+        this.lanes = this.window = this.hover = undefined;
+        this.historyLoading = false;
+        this.historyError = "";
+        this.shadowRoot?.querySelector("#history")?.close();
+    }
+    /** The leak alert, every leak sensor and every valve of this guard. */
+    historySources() {
+        const entity = this.config?.entity;
+        if (!entity)
+            return [];
+        const guard = this.guard;
+        const sensors = [
+            ...new Set([
+                ...guard.watched,
+                ...guard.fired,
+                ...guard.wet,
+                ...guard.unavailableSensors,
+            ]),
+        ];
+        return [
+            { kind: "alert", entityId: entity },
+            ...sensors.map((entityId) => ({ kind: "sensor", entityId })),
+            ...guard.valves.map((entityId) => ({ kind: "valve", entityId })),
+        ];
+    }
+    async openHistory() {
+        await this.updateComplete;
+        const dialog = this.shadowRoot?.querySelector("#history");
+        if (dialog && !dialog.open)
+            dialog.showModal();
+        void this.loadHistory();
+    }
+    async loadHistory(range = this.range) {
+        const hass = this.ha;
+        if (!hass)
+            return;
+        const ticket = ++this.historyTicket;
+        this.range = range;
+        this.historyLoading = true;
+        this.historyError = "";
+        this.hover = undefined;
+        this.requestUpdate();
+        const end = Date.now();
+        try {
+            const lanes = await loadLanes(hass, this.historySources(), hass.states, range, end);
+            if (ticket !== this.historyTicket)
+                return;
+            this.lanes = lanes;
+            this.window = [end - range * 3600000, end];
+        }
+        catch (error) {
+            if (ticket !== this.historyTicket)
+                return;
+            this.lanes = this.window = undefined;
+            this.historyError = `${this.t("historyFailed")}: ${error instanceof Error
+                ? error.message
+                : typeof error === "object" && error && "message" in error
+                    ? String(error.message)
+                    : String(error)}`;
+        }
+        this.historyLoading = false;
+        this.requestUpdate();
+    }
+    moreInfo(entityId) {
+        this.shadowRoot?.querySelector("#history")?.close();
+        this.dispatchEvent(new CustomEvent("hass-more-info", {
+            detail: { entityId },
+            bubbles: true,
+            composed: true,
+        }));
+    }
+    laneName(lane) {
+        return lane.kind === "alert"
+            ? this.t("leakAlert")
+            : friendlyName(this.ha?.states ?? {}, lane.entityId);
+    }
+    laneState(lane, state) {
+        if (state === null)
+            return "—";
+        const key = {
+            clear: "noLeak",
+            leak: lane.kind === "alert" ? "leak" : "stateWet",
+            dry: "stateDry",
+            open: "valveOpen",
+            closed: "valveClosed",
+            opening: "valveOpening",
+            closing: "valveClosing",
+        };
+        return this.t(state ? key[state] : "unavailable");
+    }
+    historyDialog() {
+        const locale = formatLocale(this.ha);
+        const format = this.ha?.locale?.time_format;
+        const hour12 = format === "12" ? true : format === "24" ? false : undefined;
+        const time = (ms, withDay) => new Intl.DateTimeFormat(locale, withDay
+            ? { weekday: "short", day: "numeric" }
+            : { hour: "2-digit", minute: "2-digit", hour12 }).format(ms);
+        const when = (ms) => new Intl.DateTimeFormat(locale, {
+            weekday: "short",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12,
+        }).format(ms);
+        const span = (hours) => new Intl.NumberFormat(locale, {
+            style: "unit",
+            unit: hours < 48 ? "hour" : "day",
+            unitDisplay: "short",
+        }).format(hours < 48 ? hours : hours / 24);
+        const lanes = this.lanes;
+        const window = this.window;
+        const at = this.hover;
+        const close = () => this.shadowRoot?.querySelector("#history")?.close();
+        return b `<dialog
+      id="history"
+      class=${this.config?.appearance === "bubble" ? "bubble" : ""}
+      aria-labelledby="history-title"
+      @close=${() => {
+            this.historyTicket++;
+            this.hover = undefined;
+        }}
+    >
+      <div class="history-head">
+        <h2 id="history-title">${this.t("historyTitle")}</h2>
+        <button
+          class="history-close"
+          data-close
+          aria-label=${this.t("close")}
+          title=${this.t("close")}
+          @click=${close}
+        >
+          ×
+        </button>
+      </div>
+      <div class="ranges" role="group" aria-label=${this.t("history")}>
+        ${RANGES.map((hours) => b `<button
+              data-range=${hours}
+              aria-pressed=${String(this.range === hours)}
+              @click=${() => void this.loadHistory(hours)}
+            >
+              ${span(hours)}
+            </button>`)}
+      </div>
+      <div
+        class="history-plot"
+        aria-busy=${String(this.historyLoading)}
+        @pointermove=${(e) => {
+            const chart = e.currentTarget.querySelector("svg");
+            if (!chart || !window)
+                return;
+            this.hover = timeAt(e, chart, window[0], window[1]);
+            this.requestUpdate();
+        }}
+        @pointerleave=${() => {
+            this.hover = undefined;
+            this.requestUpdate();
+        }}
+      >
+        ${this.historyError
+            ? b `<p class="note sev-alarm" role="alert">
+                ${this.historyError}
+              </p>`
+            : !lanes || !window
+                ? b `<p class="history-hint" role="status">
+                  ${this.t("loading")}
+                </p>`
+                : lanes.every((lane) => lane.points.every(([, v]) => !v))
+                    ? b `<p class="history-hint">${this.t("noHistory")}</p>`
+                    : timeline(lanes, window[0], window[1], at, {
+                        time,
+                        name: (lane) => this.laneName(lane),
+                        state: (lane, state) => this.laneState(lane, state),
+                        label: this.t("historyTitle"),
+                    }, Math.max(280, this.plotWidth))}
+      </div>
+      <p class="history-when" aria-live="polite">
+        ${at === undefined ? this.t("now") : when(at)}
+      </p>
+      <div class="history-legend">
+        ${(lanes ?? []).map((lane) => {
+            const state = at === undefined
+                ? lane.points[lane.points.length - 1]?.[1]
+                : stateAt(lane, at);
+            const tone = state === null ? "none" : state ? TONE[state] : "gap";
+            return b `<button
+            class=${`lane-item tone-${tone}`}
+            data-lane=${lane.entityId}
+            @click=${() => this.moreInfo(lane.entityId)}
+          >
+            <span class="lane-swatch"></span>
+            <span class="lane-name">${this.laneName(lane)}</span>
+            <strong class="lane-state">${this.laneState(lane, state)}</strong>
+          </button>`;
+        })}
+      </div>
+    </dialog>`;
+    }
     async ask() {
         const guard = this.guard;
         if (this.running || !guard.alert)
@@ -1099,16 +1762,26 @@ class WaterGuardCard extends i$1 {
             </p>`
             : A}
       <div class="tiles">
-        <div class="tile">
+        <button
+          class="tile"
+          data-history="sensors"
+          aria-describedby="history-hint"
+          @click=${this.openHistory}
+        >
           <span class="value">${guard.watched.length}</span>
           <span class="label"
             >${this.t(guard.watched.length === 1 ? "sensorsOne" : "sensors")}</span
           >
-        </div>
-        <div class="tile">
+        </button>
+        <button
+          class="tile"
+          data-history="water"
+          aria-describedby="history-hint"
+          @click=${this.openHistory}
+        >
           <span class="value">${this.waterValue(guard)}</span>
           <span class="label">${this.t("water")}</span>
-        </div>
+        </button>
         ${guard.legacy
             ? A
             : b `<div class="tile">
@@ -1131,9 +1804,17 @@ class WaterGuardCard extends i$1 {
                 ? "attention"
                 : "unknown"}"
           >
-            <span class="icon">${icon("valve")}</span>
-            <span class="name">${friendlyName(this.ha.states, valve.id)}</span>
-            <span class="status">${this.t(VALVE_LABEL[valve.status])}</span>
+            <button
+              data-history=${valve.id}
+              aria-describedby="history-hint"
+              @click=${this.openHistory}
+            >
+              <span class="icon">${icon("valve")}</span>
+              <span class="name"
+                >${friendlyName(this.ha.states, valve.id)}</span
+              >
+              <span class="status">${this.t(VALVE_LABEL[valve.status])}</span>
+            </button>
           </li>`)}
     </ul>`;
     }
@@ -1189,10 +1870,16 @@ class WaterGuardCard extends i$1 {
             const wet = guard.wet.includes(id);
             const gone = guard.unavailableSensors.includes(id);
             return b `<li>
-            <strong>${friendlyName(this.ha.states, id)}</strong>
-            <span class="badge ${wet ? "wet" : ""}"
-              >${this.t(wet ? "stillWet" : gone ? "sensorUnavailable" : "dryNow")}</span
+            <button
+              data-history=${id}
+              aria-describedby="history-hint"
+              @click=${this.openHistory}
             >
+              <strong>${friendlyName(this.ha.states, id)}</strong>
+              <span class="badge ${wet ? "wet" : ""}"
+                >${this.t(wet ? "stillWet" : gone ? "sensorUnavailable" : "dryNow")}</span
+              >
+            </button>
           </li>`;
         })}
       </ul>
@@ -1276,13 +1963,21 @@ class WaterGuardCard extends i$1 {
             <strong>${this.config.title ?? this.t("title")}</strong>
             ${sub ? b `<span class="sub">${sub}</span>` : A}
           </span>
-          <span class="status"
-            >${this.t(!guard.available
+          <button
+            class="status-button"
+            data-history="alert"
+            aria-describedby="history-hint"
+            ?disabled=${!state}
+            @click=${this.openHistory}
+          >
+            <span class="status"
+              >${this.t(!guard.available
             ? "unavailable"
             : guard.alert
                 ? "leak"
                 : "noLeak")}</span
-          >
+            >
+          </button>
           <a
             class="settings"
             href="/config/integrations/integration/water_guard"
@@ -1307,8 +2002,9 @@ class WaterGuardCard extends i$1 {
                 ${this.t("overrideFailed")}: ${this.error}
               </p>`
             : A}
+        <span id="history-hint" hidden>${this.t("showHistory")}</span>
       </ha-card>
-      ${this.renderConfirm(guard)}`;
+      ${this.renderConfirm(guard)}${this.historyDialog()}`;
     }
 }
 WaterGuardCard.styles = styles;

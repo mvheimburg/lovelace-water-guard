@@ -92,6 +92,19 @@ const en = {
   appearance: "Appearance",
   default: "Default",
   bubble: "Bubble",
+  history: "History",
+  showHistory: "Opens the history",
+  historyTitle: "Leak and valve history",
+  historyFailed: "Could not load history",
+  noHistory: "No history for this period",
+  loading: "Loading…",
+  close: "Close",
+  now: "Now",
+  leakAlert: "Leak alert",
+  stateWet: "Wet",
+  stateDry: "Dry",
+  valveOpening: "Opening",
+  valveClosing: "Closing",
 };
 
 const nb: typeof en = {
@@ -159,6 +172,19 @@ const nb: typeof en = {
   appearance: "Utseende",
   default: "Standard",
   bubble: "Bubble",
+  history: "Historikk",
+  showHistory: "Åpner historikken",
+  historyTitle: "Lekkasje- og ventilhistorikk",
+  historyFailed: "Kunne ikke hente historikk",
+  noHistory: "Ingen historikk for denne perioden",
+  loading: "Laster…",
+  close: "Lukk",
+  now: "Nå",
+  leakAlert: "Lekkasjevarsel",
+  stateWet: "Vått",
+  stateDry: "Tørt",
+  valveOpening: "Åpner",
+  valveClosing: "Stenger",
 };
 
 export type MessageKey = keyof typeof en;

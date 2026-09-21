@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/water-guard-card";
 import { WaterGuardCard } from "../src/water-guard-card";
 import { LEAK, fixture, leak, settle, text } from "./fixtures";
@@ -300,5 +300,272 @@ describe("availability and locale", () => {
     };
     expect(WaterGuardCard.getStubConfig(hass)).toEqual({ entity: LEAK });
     expect(WaterGuardCard.getStubConfig()).toEqual({ entity: "" });
+  });
+});
+
+const HOUR = 3_600_000;
+/** The fixture with a recorder: the alert fired 20 h ago, Boiler dropped out. */
+function withHistory(now: number, fail?: Error) {
+  const hass = fixture();
+  const s = (ms: number) => ms / 1000;
+  const history = vi.fn(async (m: Record<string, unknown>) => {
+    if (fail) throw fail;
+    const rows: Record<string, unknown[]> = {
+      [LEAK]: [
+        { s: "off", lu: s(now - 24 * HOUR) },
+        { s: "on", lu: s(now - 20 * HOUR) },
+        { s: "off", lu: s(now - 18 * HOUR) },
+      ],
+      "binary_sensor.sink_leak": [
+        { s: "off", lu: s(now - 24 * HOUR) },
+        { s: "on", lu: s(now - 20 * HOUR) },
+        { s: "off", lu: s(now - 19 * HOUR) },
+      ],
+      "binary_sensor.boiler_leak": [
+        { s: "off", lu: s(now - 24 * HOUR) },
+        { s: "unavailable", lu: s(now - 12 * HOUR) },
+        { s: "off", lu: s(now - 8 * HOUR) },
+      ],
+      "valve.main": [
+        { s: "open", lu: s(now - 24 * HOUR) },
+        { s: "closing", lu: s(now - 20 * HOUR) },
+        { s: "closed", lu: s(now - 19.9 * HOUR) },
+        { s: "open", lu: s(now - 18 * HOUR) },
+      ],
+    };
+    return Object.fromEntries(
+      (m.entity_ids as string[]).map((id) => [id, rows[id] ?? []]),
+    );
+  });
+  hass.callWS = history as HomeAssistant["callWS"];
+  return { hass, history };
+}
+const legend = (root: ShadowRoot) =>
+  Array.from(root.querySelectorAll(".history-legend .lane-item")).map((i) =>
+    i.textContent!.replace(/\s+/g, " ").trim(),
+  );
+async function opened(root: ShadowRoot, selector: string) {
+  root.querySelector<HTMLButtonElement>(selector)!.click();
+  await vi.waitFor(() => expect(legend(root).length).toBeGreaterThan(0));
+  await settle();
+}
+
+describe("history", () => {
+  it("opens one timeline of the alert, each leak sensor and each valve from a valve", async () => {
+    const now = Date.now();
+    const { hass, history } = withHistory(now);
+    const { root } = await mount(hass);
+    await opened(root, '[data-history="valve.main"]');
+    const dialog = root.querySelector<HTMLDialogElement>("#history")!;
+    expect(dialog.open).toBe(true);
+    expect(history).toHaveBeenCalledTimes(1);
+    const message = history.mock.calls[0][0];
+    expect(message).toMatchObject({
+      type: "history/history_during_period",
+      entity_ids: [
+        LEAK,
+        "binary_sensor.sink_leak",
+        "binary_sensor.boiler_leak",
+        "valve.main",
+      ],
+      minimal_response: true,
+      no_attributes: true,
+      significant_changes_only: false,
+    });
+    expect(Date.parse(String(message.start_time))).toBeCloseTo(
+      now - 24 * HOUR,
+      -4,
+    );
+    expect(text(root, "#history-title")).toBe("Leak and valve history");
+    expect(legend(root)).toEqual([
+      "Leak alert No leak",
+      "Sink Dry",
+      "Boiler Dry",
+      "Main valve Open",
+    ]);
+    const lanes = root.querySelectorAll(".timeline .lane");
+    expect(lanes).toHaveLength(4);
+    const states = (id: string) =>
+      Array.from(
+        root.querySelectorAll(`.timeline [data-lane="${id}"] .band`),
+      ).map((band) => band.getAttribute("data-state"));
+    expect(states(LEAK)).toEqual(["clear", "leak", "clear"]);
+    expect(states("valve.main")).toEqual(["open", "closing", "closed", "open"]);
+    // Boiler's unavailable spell is a hatched gap between two dry spells.
+    expect(states("binary_sensor.boiler_leak")).toEqual([
+      "dry",
+      "unavailable",
+      "dry",
+    ]);
+    expect(
+      root
+        .querySelector('[data-lane="binary_sensor.boiler_leak"] .tone-gap')
+        ?.getAttribute("class"),
+    ).toContain("band");
+    expect(
+      root
+        .querySelector(`[data-lane="${LEAK}"] [data-state="leak"]`)
+        ?.getAttribute("class"),
+    ).toContain("tone-alarm");
+    expect(
+      root
+        .querySelector('[data-lane="valve.main"] [data-state="closed"]')
+        ?.getAttribute("class"),
+    ).toContain("tone-attention");
+    dialog.close();
+    await opened(root, '[data-history="alert"]');
+    expect(dialog.open).toBe(true);
+    dialog.close();
+    await opened(root, '[data-history="sensors"]');
+    expect(dialog.open).toBe(true);
+  });
+
+  it("opens from a sensor in the alert and keeps the override and its confirmation", async () => {
+    const { hass } = withHistory(Date.now());
+    hass.states[LEAK] = alerting();
+    const { root } = await mount(hass);
+    await opened(root, '[data-history="binary_sensor.sink_leak"]');
+    expect(root.querySelector<HTMLDialogElement>("#history")!.open).toBe(true);
+    root.querySelector<HTMLButtonElement>("[data-close]")!.click();
+    await settle();
+    expect(root.querySelector<HTMLDialogElement>("#history")!.open).toBe(false);
+    root.querySelector<HTMLButtonElement>("[data-override]")!.click();
+    await settle();
+    expect(root.querySelector<HTMLDialogElement>("#confirm")!.open).toBe(true);
+    expect(hass.calls).toEqual([]);
+  });
+
+  it("reads each lane's state under the pointer, changes range and opens more-info", async () => {
+    const now = Date.now();
+    const { hass, history } = withHistory(now);
+    const { card, root } = await mount(hass);
+    await opened(root, '[data-history="water"]');
+    const chart = root.querySelector<SVGSVGElement>(".timeline")!;
+    const box = chart.getBoundingClientRect();
+    const width = chart.viewBox.baseVal.width;
+    const pointAt = async (hoursAgo: number) => {
+      const ratio = (24 - hoursAgo) / 24;
+      root.querySelector(".history-plot")!.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: box.left + ((12 + ratio * (width - 24)) / width) * box.width,
+        }),
+      );
+      await settle();
+    };
+    await pointAt(19.5);
+    expect(legend(root)).toEqual([
+      "Leak alert Leak",
+      "Sink Wet",
+      "Boiler Dry",
+      "Main valve Closed",
+    ]);
+    expect(text(root, ".history-when")).not.toBe("Now");
+    await pointAt(10);
+    expect(legend(root)).toContain("Boiler Unavailable");
+    root
+      .querySelector(".history-plot")!
+      .dispatchEvent(new PointerEvent("pointerleave"));
+    await settle();
+    expect(text(root, ".history-when")).toBe("Now");
+
+    root.querySelector<HTMLButtonElement>('[data-range="6"]')!.click();
+    await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+    expect(Date.parse(String(history.mock.calls[1][0].start_time))).toBeCloseTo(
+      now - 6 * HOUR,
+      -4,
+    );
+    await vi.waitFor(() =>
+      expect(
+        root.querySelector('[data-range="6"]')!.getAttribute("aria-pressed"),
+      ).toBe("true"),
+    );
+    const info: string[] = [];
+    card.addEventListener("hass-more-info", (e) =>
+      info.push((e as CustomEvent).detail.entityId),
+    );
+    await vi.waitFor(() => expect(legend(root)).toHaveLength(4));
+    root
+      .querySelector<HTMLButtonElement>(
+        '.lane-item[data-lane="binary_sensor.boiler_leak"]',
+      )!
+      .click();
+    expect(info).toEqual(["binary_sensor.boiler_leak"]);
+    expect(root.querySelector<HTMLDialogElement>("#history")!.open).toBe(false);
+  });
+
+  it("explains a failed history request in Bokmål, with Norwegian ranges", async () => {
+    const { hass } = withHistory(Date.now(), new Error("Recorder is off"));
+    hass.language = "nb";
+    hass.locale = { language: "nb-NO", time_format: "language" };
+    const { root } = await mount(hass);
+    root.querySelector<HTMLButtonElement>('[data-history="alert"]')!.click();
+    await vi.waitFor(() =>
+      expect(text(root, "#history [role=alert]")).toBe(
+        "Kunne ikke hente historikk: Recorder is off",
+      ),
+    );
+    expect(
+      Array.from(root.querySelectorAll("[data-range]")).map((b) =>
+        b.textContent!.trim(),
+      ),
+    ).toEqual(["6 t", "24 t", "7 d"]);
+    expect(text(root, "#history-title")).toBe("Lekkasje- og ventilhistorikk");
+    expect(root.querySelector("[data-close]")?.getAttribute("aria-label")).toBe(
+      "Lukk",
+    );
+  });
+
+  it("reads Bokmål states, falls back to the connection and ignores a stale reply", async () => {
+    const now = Date.now();
+    const { hass, history } = withHistory(now);
+    hass.language = "nb";
+    delete hass.callWS;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let asked = 0;
+    hass.connection = {
+      sendMessagePromise: (async (m: Record<string, unknown>) => {
+        if (asked++ === 0) await gate;
+        return history(m);
+      }) as NonNullable<HomeAssistant["connection"]>["sendMessagePromise"],
+    };
+    const { root } = await mount(hass);
+    root
+      .querySelector<HTMLButtonElement>('[data-history="valve.main"]')!
+      .click();
+    await settle();
+    expect(text(root, ".history-plot")).toBe("Laster…");
+    // A newer range answers first; the older reply must not replace it.
+    root.querySelector<HTMLButtonElement>('[data-range="168"]')!.click();
+    await vi.waitFor(() => expect(legend(root)).toHaveLength(4));
+    release();
+    await settle();
+    expect(
+      root.querySelector('[data-range="168"]')!.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(legend(root)).toEqual([
+      "Lekkasjevarsel Ingen lekkasje",
+      "Sink Tørt",
+      "Boiler Tørt",
+      "Main valve Åpen",
+    ]);
+  });
+
+  it("says when there is no history and fails clearly without a websocket", async () => {
+    const hass = fixture(leak("unavailable", { leak_sensors: [], valves: [] }));
+    hass.callWS = (async () => ({})) as HomeAssistant["callWS"];
+    const { root } = await mount(hass);
+    root.querySelector<HTMLButtonElement>('[data-history="alert"]')!.click();
+    await vi.waitFor(() =>
+      expect(text(root, ".history-plot")).toBe("No history for this period"),
+    );
+    root.querySelector<HTMLButtonElement>("[data-close]")!.click();
+    delete hass.callWS;
+    root.querySelector<HTMLButtonElement>('[data-history="alert"]')!.click();
+    await vi.waitFor(() =>
+      expect(text(root, "#history [role=alert]")).toContain(
+        "Home Assistant history API unavailable",
+      ),
+    );
   });
 });
