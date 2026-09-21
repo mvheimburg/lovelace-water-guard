@@ -1,6 +1,6 @@
 {
   "name": "lovelace-water-guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lovelace card for the Water Guard Home Assistant integration",
   "type": "module",
   "scripts": {

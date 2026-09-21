@@ -1,3 +1,4 @@
+import { colorSchemeSelector } from "./color-schemes";
 import { LitElement, css, html, nothing } from "lit";
 import { localize, type MessageKey } from "./localize";
 import { friendlyName, guardSensors } from "./model";
@@ -70,6 +71,7 @@ export class WaterGuardCardEditor extends LitElement {
     const choices = guardSensors(states);
     if (entity && !choices.includes(entity)) choices.unshift(entity);
     return html`
+      ${colorSchemeSelector(this.ha, this.config.color_scheme, (scheme) => this.change("color_scheme", scheme))}
       <label>
         ${this.t("entity")}
         <select

@@ -1,3 +1,4 @@
+import { applyColorScheme } from "./color-schemes";
 import { LitElement, html, nothing } from "lit";
 import { validateConfig } from "./config";
 import { icon } from "./icons";
@@ -36,6 +37,7 @@ export class WaterGuardCard extends LitElement {
   }
   setConfig(config: Record<string, unknown>) {
     const next = validateConfig(config);
+    applyColorScheme(this, config.color_scheme, this.ha);
     if (next.entity !== this.config?.entity) {
       // A different guard: nothing from the previous one may linger.
       this.error = "";

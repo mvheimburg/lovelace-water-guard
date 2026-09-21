@@ -1,3 +1,4 @@
+import type { ColorScheme } from "./color-schemes";
 export interface HassEntity {
   entity_id: string;
   state: string;
@@ -26,6 +27,7 @@ export interface CardConfig {
   entity: string;
   title?: string;
   appearance: "default" | "bubble";
+  color_scheme?: ColorScheme;
 }
 
 export type ValveStatus = "open" | "closed" | "moving" | "unavailable";
