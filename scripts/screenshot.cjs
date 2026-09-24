@@ -31,8 +31,8 @@ function states(variant) {
       "Laundry",
     ),
     "valve.main": entity("valve.main", "open", "Main valve"),
-    "person.kari": entity("person.kari", "home", "Kari"),
-    "person.ola": entity("person.ola", "home", "Ola"),
+    "person.resident_1": entity("person.resident_1", "home", "Beboer 1"),
+    "person.resident_2": entity("person.resident_2", "home", "Beboer 2"),
   };
   const leak = {
     entity_id: "binary_sensor.water_leak",
@@ -43,7 +43,7 @@ function states(variant) {
         id.startsWith("binary_sensor."),
       ),
       valves: ["valve.main"],
-      people: ["person.kari", "person.ola"],
+      people: ["person.resident_1", "person.resident_2"],
       since: null,
       sensors: [],
       notified: {},
@@ -58,7 +58,7 @@ function states(variant) {
       since: new Date(Date.now() - 14 * 60000).toISOString(),
       sensors: ["binary_sensor.kitchen_leak", "binary_sensor.laundry_leak"],
       wet_sensors: ["binary_sensor.kitchen_leak"],
-      notified: { "person.kari": "sent", "person.ola": "no_app" },
+      notified: { "person.resident_1": "sent", "person.resident_2": "no_app" },
     });
     base["valve.main"].state = "closed";
   }
@@ -69,7 +69,11 @@ function states(variant) {
   return { ...base, "binary_sensor.water_leak": leak };
 }
 
-async function shot(browser, errors, { file, width, height, theme, cards }) {
+async function shot(
+  browser,
+  errors,
+  { file, width, height, theme, cards, history = false },
+) {
   const page = await browser.newPage({
     viewport: { width, height },
     deviceScaleFactor: 1,
@@ -94,6 +98,29 @@ async function shot(browser, errors, { file, width, height, theme, cards }) {
         language: "en",
         locale: { language: "en-GB" },
         callService: async () => {},
+        callWS: async (message) => {
+          const start = Date.parse(message.start_time) / 1000;
+          const now = Date.now() / 1000;
+          return Object.fromEntries(
+            message.entity_ids.map((id) => {
+              const valve = id.startsWith("valve.");
+              const quiet = valve ? "open" : "off";
+              const active = valve ? "closed" : "on";
+              const marks = id.includes("boiler")
+                ? [
+                    [quiet, start],
+                    ["unavailable", now - 12 * 3600],
+                    [quiet, now - 8 * 3600],
+                  ]
+                : [
+                    [quiet, start],
+                    [active, now - 6 * 3600],
+                    [quiet, now - 4 * 3600],
+                  ];
+              return [id, marks.map(([s, lu]) => ({ s, lu }))];
+            }),
+          );
+        },
       };
       document.querySelector("main").append(card);
     }
@@ -105,6 +132,11 @@ async function shot(browser, errors, { file, width, height, theme, cards }) {
       ).length === count,
     cards.length,
   );
+  if (history) {
+    await page.locator('water-guard-card [data-history="water"]').click();
+    await page.locator("water-guard-card #history .timeline").waitFor();
+    await page.waitForTimeout(100);
+  }
   await page.screenshot({ path: resolve(root, "docs", file), fullPage: true });
 }
 
@@ -132,9 +164,17 @@ async function shot(browser, errors, { file, width, height, theme, cards }) {
       theme: dark,
       cards: cards("bubble"),
     });
+    await shot(browser, errors, {
+      file: "water-guard-history.png",
+      width: 760,
+      height: 790,
+      theme: dark,
+      cards: [{ config: { appearance: "bubble" }, states: states("calm") }],
+      history: true,
+    });
     if (errors.length) throw new Error(`Browser errors: ${errors.join("; ")}`);
     console.log(
-      "Wrote docs/water-guard-light.png and docs/water-guard-dark.png with simulated Home Assistant data.",
+      "Wrote docs/water-guard-light.png docs/water-guard-dark.png and docs/water-guard-history.png with simulated Home Assistant data.",
     );
   } finally {
     await browser.close();

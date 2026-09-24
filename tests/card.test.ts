@@ -351,6 +351,55 @@ async function opened(root: ShadowRoot, selector: string) {
 }
 
 describe("history", () => {
+  it("ignores a recorder reply after history closes and reopens", async () => {
+    const { hass, history } = withHistory(Date.now());
+    let rejectOld!: (reason: Error) => void;
+    history.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectOld = reject;
+        }),
+    );
+    const { root } = await mount(hass);
+    root.querySelector<HTMLButtonElement>('[data-history="water"]')!.click();
+    await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(1));
+    root.querySelector<HTMLDialogElement>("#history")!.close();
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-history="water"]')!.click();
+    await vi.waitFor(() =>
+      expect(root.querySelector(".timeline")).not.toBeNull(),
+    );
+    rejectOld(new Error("Old failure"));
+    await settle();
+    expect(root.querySelector("#history [role=alert]")).toBeNull();
+    expect(root.querySelector(".timeline")).not.toBeNull();
+  });
+
+  it("retries a failed recorder request and returns focus to the reading", async () => {
+    const { hass, history } = withHistory(Date.now());
+    history.mockRejectedValueOnce(new Error("Recorder offline"));
+    const { root } = await mount(hass);
+    const trigger = root.querySelector<HTMLButtonElement>(
+      '[data-history="water"]',
+    )!;
+    trigger.focus();
+    trigger.click();
+    await vi.waitFor(() =>
+      expect(text(root, "#history [role=alert] span")).toContain(
+        "Recorder offline",
+      ),
+    );
+    const retry = root.querySelector<HTMLButtonElement>("[data-retry]");
+    expect(retry).not.toBeNull();
+    retry!.click();
+    await vi.waitFor(() =>
+      expect(root.querySelector(".timeline")).not.toBeNull(),
+    );
+    expect(history).toHaveBeenCalledTimes(2);
+    root.querySelector<HTMLButtonElement>("[data-close-history]")!.click();
+    await vi.waitFor(() => expect(root.activeElement).toBe(trigger));
+  });
+
   it("opens one timeline of the alert, each leak sensor and each valve from a valve", async () => {
     const now = Date.now();
     const { hass, history } = withHistory(now);
@@ -383,7 +432,7 @@ describe("history", () => {
       "Boiler Dry",
       "Main valve Open",
     ]);
-    const lanes = root.querySelectorAll(".timeline .lane");
+    const lanes = root.querySelectorAll(".timeline .band-lane");
     expect(lanes).toHaveLength(4);
     const states = (id: string) =>
       Array.from(
@@ -392,26 +441,22 @@ describe("history", () => {
     expect(states(LEAK)).toEqual(["clear", "leak", "clear"]);
     expect(states("valve.main")).toEqual(["open", "closing", "closed", "open"]);
     // Boiler's unavailable spell is a hatched gap between two dry spells.
-    expect(states("binary_sensor.boiler_leak")).toEqual([
-      "dry",
-      "unavailable",
-      "dry",
-    ]);
+    expect(states("binary_sensor.boiler_leak")).toEqual(["dry", "", "dry"]);
     expect(
       root
-        .querySelector('[data-lane="binary_sensor.boiler_leak"] .tone-gap')
+        .querySelector('[data-lane="binary_sensor.boiler_leak"] .b-gap')
         ?.getAttribute("class"),
     ).toContain("band");
     expect(
       root
         .querySelector(`[data-lane="${LEAK}"] [data-state="leak"]`)
         ?.getAttribute("class"),
-    ).toContain("tone-alarm");
+    ).toContain("b-alarm");
     expect(
       root
         .querySelector('[data-lane="valve.main"] [data-state="closed"]')
         ?.getAttribute("class"),
-    ).toContain("tone-attention");
+    ).toContain("b-attention");
     dialog.close();
     await opened(root, '[data-history="alert"]');
     expect(dialog.open).toBe(true);
@@ -426,7 +471,7 @@ describe("history", () => {
     const { root } = await mount(hass);
     await opened(root, '[data-history="binary_sensor.sink_leak"]');
     expect(root.querySelector<HTMLDialogElement>("#history")!.open).toBe(true);
-    root.querySelector<HTMLButtonElement>("[data-close]")!.click();
+    root.querySelector<HTMLButtonElement>("[data-close-history]")!.click();
     await settle();
     expect(root.querySelector<HTMLDialogElement>("#history")!.open).toBe(false);
     root.querySelector<HTMLButtonElement>("[data-override]")!.click();
@@ -447,7 +492,7 @@ describe("history", () => {
       const ratio = (24 - hoursAgo) / 24;
       root.querySelector(".history-plot")!.dispatchEvent(
         new PointerEvent("pointermove", {
-          clientX: box.left + ((12 + ratio * (width - 24)) / width) * box.width,
+          clientX: box.left + ((22 + ratio * (width - 44)) / width) * box.width,
         }),
       );
       await settle();
@@ -500,7 +545,7 @@ describe("history", () => {
     const { root } = await mount(hass);
     root.querySelector<HTMLButtonElement>('[data-history="alert"]')!.click();
     await vi.waitFor(() =>
-      expect(text(root, "#history [role=alert]")).toBe(
+      expect(text(root, "#history [role=alert] span")).toBe(
         "Kunne ikke hente historikk: Recorder is off",
       ),
     );
@@ -510,9 +555,9 @@ describe("history", () => {
       ),
     ).toEqual(["6 t", "24 t", "7 d"]);
     expect(text(root, "#history-title")).toBe("Lekkasje- og ventilhistorikk");
-    expect(root.querySelector("[data-close]")?.getAttribute("aria-label")).toBe(
-      "Lukk",
-    );
+    expect(
+      root.querySelector("[data-close-history]")?.getAttribute("aria-label"),
+    ).toBe("Lukk");
   });
 
   it("reads Bokmål states, falls back to the connection and ignores a stale reply", async () => {
@@ -559,12 +604,12 @@ describe("history", () => {
     await vi.waitFor(() =>
       expect(text(root, ".history-plot")).toBe("No history for this period"),
     );
-    root.querySelector<HTMLButtonElement>("[data-close]")!.click();
+    root.querySelector<HTMLButtonElement>("[data-close-history]")!.click();
     delete hass.callWS;
     root.querySelector<HTMLButtonElement>('[data-history="alert"]')!.click();
     await vi.waitFor(() =>
-      expect(text(root, "#history [role=alert]")).toContain(
-        "Home Assistant history API unavailable",
+      expect(text(root, "#history [role=alert] span")).toContain(
+        "No connection to Home Assistant",
       ),
     );
   });

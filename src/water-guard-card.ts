@@ -1,18 +1,25 @@
+import {
+  HistoryController,
+  historyDialog,
+  openHistoryDialog,
+  historyFormat,
+  historyStrings,
+  historyStyles,
+  timeline,
+  timelineTimeAt,
+} from "lovelace-card-history";
 import { applyColorScheme } from "./color-schemes";
 import { LitElement, html, nothing } from "lit";
-import { timeAt, timeline } from "./chart";
 import { validateConfig } from "./config";
 import { icon } from "./icons";
 import { formatLocale, list, localize, type MessageKey } from "./localize";
 import {
-  RANGES,
   TONE,
   loadLanes,
   stateAt,
   type Lane,
   type LaneKind,
   type LaneState,
-  type Range,
 } from "./history";
 import { friendlyName, guardSensors, readGuard, valveStatus } from "./model";
 import { styles } from "./styles";
@@ -31,7 +38,7 @@ const VALVE_LABEL: Record<ValveStatus, MessageKey> = {
  * override. Water Guard owns the alert; the card only calls its override.
  */
 export class WaterGuardCard extends LitElement {
-  static styles = styles;
+  static styles = [historyStyles, styles];
   private config?: CardConfig;
   private ha?: HomeAssistant;
   private pending = false;
@@ -40,15 +47,9 @@ export class WaterGuardCard extends LitElement {
   private confirming?: string;
   private timer?: ReturnType<typeof setInterval>;
   /** History dialog: chosen range, loaded lanes and the hovered time. */
-  private range: Range = 24;
-  private lanes?: Lane[];
-  private window?: [number, number];
-  private historyLoading = false;
-  private historyError = "";
-  private hover?: number;
-  private historyTicket = 0;
-  private plotWidth = 600;
-  private resize?: ResizeObserver;
+  private history = new HistoryController<Lane[]>(this, (range, end) =>
+    loadLanes(this.ha!, this.historySources(), this.ha!.states, range, end),
+  );
 
   static getConfigElement() {
     return document.createElement("water-guard-card-editor");
@@ -88,22 +89,9 @@ export class WaterGuardCard extends LitElement {
     clearInterval(this.timer);
     this.closeDialog();
     this.closeHistory();
-    this.resize?.disconnect();
-    this.resize = undefined;
   }
   protected updated() {
-    const plot = this.shadowRoot?.querySelector(".history-plot");
-    if (!plot || this.resize) return;
-    this.resize = new ResizeObserver(([entry]) => {
-      const width = Math.round(entry.contentRect.width);
-      // Redraw next frame, outside the observer's own layout pass.
-      if (width > 0 && Math.abs(width - this.plotWidth) > 4)
-        requestAnimationFrame(() => {
-          this.plotWidth = width;
-          this.requestUpdate();
-        });
-    });
-    this.resize.observe(plot);
+    this.history.observe(this.shadowRoot?.querySelector(".history-plot"));
   }
 
   private t(key: MessageKey, values?: Record<string, string | number>) {
@@ -182,10 +170,7 @@ export class WaterGuardCard extends LitElement {
   }
   /** Close the history and drop what it loaded; a late reply is ignored. */
   private closeHistory() {
-    this.historyTicket++;
-    this.lanes = this.window = this.hover = undefined;
-    this.historyLoading = false;
-    this.historyError = "";
+    this.history.reset();
     this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
   }
   /** The leak alert, every leak sensor and every valve of this guard. */
@@ -207,48 +192,16 @@ export class WaterGuardCard extends LitElement {
       ...guard.valves.map((entityId) => ({ kind: "valve" as const, entityId })),
     ];
   }
-  private async openHistory() {
-    await this.updateComplete;
-    const dialog =
-      this.shadowRoot?.querySelector<HTMLDialogElement>("#history");
-    if (dialog && !dialog.open) dialog.showModal();
-    void this.loadHistory();
+  private async openHistory(event: Event) {
+    await openHistoryDialog(
+      this.history,
+      this.shadowRoot,
+      this,
+      this.t("historyFailed"),
+      event.currentTarget as HTMLElement,
+    );
   }
-  private async loadHistory(range: Range = this.range) {
-    const hass = this.ha;
-    if (!hass) return;
-    const ticket = ++this.historyTicket;
-    this.range = range;
-    this.historyLoading = true;
-    this.historyError = "";
-    this.hover = undefined;
-    this.requestUpdate();
-    const end = Date.now();
-    try {
-      const lanes = await loadLanes(
-        hass,
-        this.historySources(),
-        hass.states,
-        range,
-        end,
-      );
-      if (ticket !== this.historyTicket) return;
-      this.lanes = lanes;
-      this.window = [end - range * 3_600_000, end];
-    } catch (error) {
-      if (ticket !== this.historyTicket) return;
-      this.lanes = this.window = undefined;
-      this.historyError = `${this.t("historyFailed")}: ${
-        error instanceof Error
-          ? error.message
-          : typeof error === "object" && error && "message" in error
-            ? String(error.message)
-            : String(error)
-      }`;
-    }
-    this.historyLoading = false;
-    this.requestUpdate();
-  }
+
   private moreInfo(entityId: string) {
     this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
     this.dispatchEvent(
@@ -264,7 +217,7 @@ export class WaterGuardCard extends LitElement {
       ? this.t("leakAlert")
       : friendlyName(this.ha?.states ?? {}, lane.entityId);
   }
-  private laneState(lane: Lane, state: LaneState | undefined | null) {
+  private laneState(lane: Lane, state: string | undefined | null) {
     if (state === null) return "—";
     const key: Record<LaneState, MessageKey> = {
       clear: "noLeak",
@@ -275,120 +228,53 @@ export class WaterGuardCard extends LitElement {
       opening: "valveOpening",
       closing: "valveClosing",
     };
-    return this.t(state ? key[state] : "unavailable");
+    return this.t(state ? key[state as LaneState] : "unavailable");
   }
   private historyDialog() {
-    const locale = formatLocale(this.ha);
-    const format = this.ha?.locale?.time_format;
-    const hour12 = format === "12" ? true : format === "24" ? false : undefined;
-    const time = (ms: number, withDay: boolean) =>
-      new Intl.DateTimeFormat(
-        locale,
-        withDay
-          ? { weekday: "short", day: "numeric" }
-          : { hour: "2-digit", minute: "2-digit", hour12 },
-      ).format(ms);
-    const when = (ms: number) =>
-      new Intl.DateTimeFormat(locale, {
-        weekday: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12,
-      }).format(ms);
-    const span = (hours: number) =>
-      new Intl.NumberFormat(locale, {
-        style: "unit",
-        unit: hours < 48 ? "hour" : "day",
-        unitDisplay: "short",
-      }).format(hours < 48 ? hours : hours / 24);
-    const lanes = this.lanes;
-    const window = this.window;
-    const at = this.hover;
-    const close = () =>
-      this.shadowRoot?.querySelector<HTMLDialogElement>("#history")?.close();
-    return html`<dialog
-      id="history"
-      class=${this.config?.appearance === "bubble" ? "bubble" : ""}
-      aria-labelledby="history-title"
-      @close=${() => {
-        this.historyTicket++;
-        this.hover = undefined;
-      }}
-    >
-      <div class="history-head">
-        <h2 id="history-title">${this.t("historyTitle")}</h2>
-        <button
-          class="history-close"
-          data-close
-          aria-label=${this.t("close")}
-          title=${this.t("close")}
-          @click=${close}
-        >
-          ×
-        </button>
-      </div>
-      <div class="ranges" role="group" aria-label=${this.t("history")}>
-        ${RANGES.map(
-          (hours) =>
-            html`<button
-              data-range=${hours}
-              aria-pressed=${String(this.range === hours)}
-              @click=${() => void this.loadHistory(hours)}
-            >
-              ${span(hours)}
-            </button>`,
-        )}
-      </div>
-      <div
-        class="history-plot"
-        aria-busy=${String(this.historyLoading)}
-        @pointermove=${(e: PointerEvent) => {
-          const chart = (e.currentTarget as HTMLElement).querySelector("svg");
-          if (!chart || !window) return;
-          this.hover = timeAt(e, chart, window[0], window[1]);
-          this.requestUpdate();
-        }}
-        @pointerleave=${() => {
-          this.hover = undefined;
-          this.requestUpdate();
-        }}
-      >
-        ${
-          this.historyError
-            ? html`<p class="note sev-alarm" role="alert">
-                ${this.historyError}
-              </p>`
-            : !lanes || !window
-              ? html`<p class="history-hint" role="status">
-                  ${this.t("loading")}
-                </p>`
-              : lanes.every((lane) => lane.points.every(([, v]) => !v))
-                ? html`<p class="history-hint">${this.t("noHistory")}</p>`
-                : timeline(
-                    lanes,
-                    window[0],
-                    window[1],
-                    at,
-                    {
-                      time,
-                      name: (lane) => this.laneName(lane),
-                      state: (lane, state) => this.laneState(lane, state),
-                      label: this.t("historyTitle"),
-                    },
-                    Math.max(280, this.plotWidth),
-                  )
-        }
-      </div>
-      <p class="history-when" aria-live="polite">
-        ${at === undefined ? this.t("now") : when(at)}
-      </p>
-      <div class="history-legend">
-        ${(lanes ?? []).map((lane) => {
+    const title = this.t("historyTitle");
+    const format = historyFormat(this.ha);
+    return historyDialog(this.history, {
+      strings: {
+        ...historyStrings(this.ha),
+        history: title,
+        loading: this.t("loading"),
+        empty: this.t("noHistory"),
+        closeHistory: this.t("close"),
+      },
+      format,
+      chart: (lanes, window, at, width) =>
+        timeline(
+          lanes,
+          window[0],
+          window[1],
+          at,
+          {
+            time: format.time,
+            lane: (lane) => this.laneName(lane),
+            laneId: (lane) => lane.entityId,
+            stateLabel: (lane, state) =>
+              this.laneState(lane, state as LaneState | undefined),
+            label: title,
+            tone: (_lane, state) => TONE[state as LaneState],
+          },
+          width,
+        ),
+      isEmpty: (lanes) =>
+        lanes.every(
+          (lane) => !lane.marks.some(([, state]) => state !== undefined),
+        ),
+      timeAt: (event, svg, window) =>
+        timelineTimeAt(event, svg, window[0], window[1]),
+      legend: () => [],
+      select: (entityId) => this.moreInfo(entityId),
+      renderLegend: (lanes, at) => html`
+        ${lanes.map((lane) => {
           const state =
             at === undefined
-              ? lane.points[lane.points.length - 1]?.[1]
+              ? lane.marks[lane.marks.length - 1]?.[1]
               : stateAt(lane, at);
-          const tone = state === null ? "none" : state ? TONE[state] : "gap";
+          const tone =
+            state === null ? "none" : state ? TONE[state as LaneState] : "gap";
           return html`<button
             class=${`lane-item tone-${tone}`}
             data-lane=${lane.entityId}
@@ -399,9 +285,10 @@ export class WaterGuardCard extends LitElement {
             <strong class="lane-state">${this.laneState(lane, state)}</strong>
           </button>`;
         })}
-      </div>
-    </dialog>`;
+      `,
+    });
   }
+
   private async ask() {
     const guard = this.guard;
     if (this.running || !guard.alert) return;

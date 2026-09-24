@@ -376,85 +376,46 @@ export const styles = css`
   }
 
   /* History: one timeline lane per entity, coloured by state. */
+  .b-ok,
   .tone-ok {
     --tone: var(--wg-water);
   }
+  .b-alarm,
   .tone-alarm {
     --tone: var(--wg-alarm);
   }
+  .b-attention,
   .tone-attention {
     --tone: var(--wg-warn);
   }
+  .b-moving,
   .tone-moving {
     --tone: color-mix(in srgb, var(--wg-water) 45%, var(--wg-neutral));
   }
   .tone-gap,
+  .b-none,
   .tone-none {
     --tone: var(--wg-neutral);
   }
-  dialog#history {
-    background: var(--ha-card-background, var(--card-background-color, #fff));
-    border-radius: var(--ha-card-border-radius, 20px);
-    padding: 16px 16px 20px;
-    width: min(640px, calc(100vw - 24px));
-    max-height: 90dvh;
-    overflow: auto;
+  :host {
+    --history-text: var(--wg-text);
+    --history-muted: var(--wg-muted);
+    --history-surface: var(
+      --ha-card-background,
+      var(--card-background-color, #fff)
+    );
+    --history-pill: var(--secondary-background-color, #f3f2ee);
   }
-  dialog#history.bubble {
-    background: var(
+  ha-card.bubble ~ dialog#history {
+    --history-surface-color: var(
       --bubble-main-background-color,
       var(--ha-card-background, var(--card-background-color, #fff))
     );
-    border-radius: min(var(--bubble-border-radius, 32px), 28px);
-  }
-  .history-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .history-head h2 {
-    flex: 1;
-    margin: 0 4px;
-    font-size: 1.15rem;
-  }
-  .history-close {
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    font-size: 24px;
-    line-height: 1;
-    background: var(--secondary-background-color, #f3f2ee);
-  }
-  .ranges {
-    display: flex;
-    gap: 6px;
-    margin: 10px 0 8px;
-  }
-  .ranges button {
-    min-height: 44px;
-    padding: 0 16px;
-    font-size: 0.85rem;
-    font-weight: 600;
-    background: var(--secondary-background-color, #f3f2ee);
-  }
-  .ranges button[aria-pressed="true"] {
-    background: color-mix(
-      in srgb,
-      var(--wg-water) 24%,
+    --history-pill-color: var(
+      --bubble-secondary-background-color,
       var(--secondary-background-color, #f3f2ee)
     );
-  }
-  .history-plot {
-    min-height: 120px;
-    touch-action: pan-y;
-  }
-  .history-plot .note {
-    margin: 16px 0;
-  }
-  .history-hint {
-    margin: 40px 0;
-    text-align: center;
-    color: var(--wg-muted);
+    --history-radius: min(var(--bubble-border-radius, 32px), 28px);
   }
   .timeline {
     display: block;
@@ -469,7 +430,7 @@ export const styles = css`
     font-size: 12px;
     font-variant-numeric: tabular-nums;
   }
-  .timeline .lane-title {
+  .timeline .lane-label {
     fill: var(--wg-muted);
     font-size: 12px;
     font-weight: 600;
@@ -480,16 +441,16 @@ export const styles = css`
   .timeline .band {
     fill: color-mix(in srgb, var(--tone) 34%, transparent);
   }
-  .timeline .band.tone-alarm {
+  .timeline .band.b-alarm {
     fill: var(--tone);
   }
-  .timeline .band.tone-gap {
-    fill: url(#wg-gap);
+  .timeline .band.b-gap {
+    fill: url(#history-hatch);
   }
-  .timeline .gap-bg {
+  .timeline .hatch-bg {
     fill: color-mix(in srgb, var(--wg-neutral) 10%, transparent);
   }
-  .timeline .gap-line {
+  .timeline .hatch {
     stroke: color-mix(in srgb, var(--wg-neutral) 55%, transparent);
     stroke-width: 2;
   }
@@ -499,10 +460,10 @@ export const styles = css`
     font-weight: 600;
     pointer-events: none;
   }
-  .timeline .band-label.tone-alarm {
+  .timeline .band-label.b-alarm {
     fill: #fff;
   }
-  .timeline .band-label.tone-gap {
+  .timeline .band-label.b-gap {
     fill: var(--wg-muted);
   }
   .timeline .cursor {

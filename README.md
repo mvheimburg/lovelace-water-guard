@@ -11,6 +11,8 @@ Bokmål (*Vannvakt*).
 
 ![The same three states with the Bubble appearance in a dark theme](docs/water-guard-dark.png)
 
+![Leak, sensor and valve recorder history with unavailable gaps](docs/water-guard-history.png)
+
 The images use the production bundle with simulated Home Assistant states. No
 live Home Assistant instance was involved.
 
@@ -158,3 +160,9 @@ their current appearance. Scheme names and the editor label support English and
 Norwegian Bokmål; YAML values remain unchanged in either language. Static
 card-picker metadata remains English because it has no Home Assistant language
 context.
+
+History uses the bundled `lovelace-card-history` library; no additional Lovelace
+resource is needed. Its recorder dialog offers 6 h, 24 h and 7 d, pointer
+readouts, localized labels, gaps for unavailable states and entity details from
+the legend. Failed requests offer **Try again**; closing returns keyboard focus
+to the reading that opened it.
